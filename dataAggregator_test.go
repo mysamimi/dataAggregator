@@ -58,7 +58,7 @@ func TestAdd(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	agg := New[TestData, TestKey](
+	agg := New[TestData, TestKey, uint64](
 		ctx,
 		time.Second,
 		10,
@@ -73,7 +73,7 @@ func TestAdd(t *testing.T) {
 	// Test adding a single item
 	v1 := uint64(5)
 	data1 := &TestData{ID: "test1", Value: &v1}
-	agg.Add(data1, "")
+	agg.Add("", data1)
 
 	// Verify it was added to the slice
 	found := false
@@ -91,7 +91,7 @@ func TestAdd(t *testing.T) {
 	v2 := uint64(10)
 	// Create data with the same memory pointer
 	data2 := &TestData{ID: "test1", Value: &v2}
-	agg.Add(data2, "") // This should atomically add 10 to the existing value
+	agg.Add("", data2) // This should atomically add 10 to the existing value
 
 	// Verify values were aggregated
 	found = false
@@ -107,7 +107,7 @@ func TestAdd(t *testing.T) {
 	// Test adding an item with value 0 should be ignored
 	v3 := uint64(0)
 	data3 := &TestData{ID: "test2", Value: &v3}
-	agg.Add(data3, "")
+	agg.Add("", data3)
 
 	// Verify it was not added
 	found = false
@@ -142,10 +142,10 @@ func TestCleanup(t *testing.T) {
 	// Add test data
 	v1 := uint64(5)
 	data1 := &TestData{ID: "test1", Value: &v1}
-	agg.Add(data1, "")
+	agg.Add("", data1)
 	v2 := uint64(10)
 	data2 := &TestData{ID: "test2", Value: &v2}
-	agg.Add(data2, "")
+	agg.Add("", data2)
 
 	// Manually trigger cleanup
 	agg.Cleanup()
@@ -221,7 +221,7 @@ func TestAutomaticCleanup(t *testing.T) {
 	// Add test data
 	v1 := uint64(5)
 	data1 := &TestData{ID: "test1", Value: &v1}
-	agg.Add(data1, "")
+	agg.Add("", data1)
 
 	// Wait for cleanup to happen automatically
 	time.Sleep(time.Millisecond * 100)
@@ -267,7 +267,7 @@ func TestParallelAdd(t *testing.T) {
 	// First add the initial data
 	v0 := uint64(0)
 	initialData := &TestData{ID: testKey, Value: &v0}
-	agg.Add(initialData, "")
+	agg.Add("", initialData)
 
 	// Now have multiple goroutines update it
 	for i := 0; i < numWorkers; i++ {
@@ -276,7 +276,7 @@ func TestParallelAdd(t *testing.T) {
 			for j := 0; j < incrementsPerWorker; j++ {
 				v1 := uint64(1)
 				increment := &TestData{ID: testKey, Value: &v1}
-				agg.Add(increment, "")
+				agg.Add("", increment)
 			}
 		}()
 	}
@@ -320,7 +320,7 @@ func TestShutdown(t *testing.T) {
 	// Add data
 	v1 := uint64(5)
 	data1 := &TestData{ID: "test1", Value: &v1}
-	agg.Add(data1, "")
+	agg.Add("", data1)
 
 	// Give data time to be processed
 	time.Sleep(time.Millisecond * 100)
@@ -371,7 +371,7 @@ func BenchmarkParallelAdd(b *testing.B) {
 		// First add the initial data
 		v0 := uint64(0)
 		initialData := &TestData{ID: "benchmark-test", Value: &v0}
-		agg.Add(initialData, "")
+		agg.Add("", initialData)
 
 		// Configure workers based on available CPUs
 		numWorkers := runtime.NumCPU()
@@ -388,7 +388,7 @@ func BenchmarkParallelAdd(b *testing.B) {
 				for j := 0; j < incrementsPerWorker; j++ {
 					v1 := uint64(1)
 					increment := &TestData{ID: "benchmark-test", Value: &v1}
-					agg.Add(increment, "")
+					agg.Add("", increment)
 				}
 			}()
 		}
@@ -443,12 +443,12 @@ func BenchmarkParallelAddMultipleKeys(b *testing.B) {
 					// Initialize the key
 					v0 := uint64(0)
 					initialData := &TestData{ID: keyID, Value: &v0}
-					agg.Add(initialData, "")
+					agg.Add("", initialData)
 
 					// Increment the key many times
 					for j := 0; j < incrementsPerKey; j++ {
 						*initialData.Value = 1
-						agg.Add(initialData, "")
+						agg.Add("", initialData)
 					}
 				}
 			}()

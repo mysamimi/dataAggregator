@@ -7,7 +7,7 @@ A high-performance, concurrent data aggregation library for Go applications. Eff
 
 - **High Concurrency**: Sharded map design optimized for parallel operations
 - **Generic Types**: Works with any comparable key and value types
-- **Atomic Updates**: Thread-safe value aggregation
+- **Atomic Updates**: Thread-safe value aggregation with support for multiple numeric types
 - **Periodic Cleanup**: Configurable intervals for processing aggregated data
 - **Memory Efficient**: Only allocates what you need
 - **Type Safe**: Fully leverages Go generics
@@ -51,7 +51,7 @@ func main() {
     // Create the aggregator
     // - cleanup every 5 seconds
     // - channel buffer size of 1000 items
-    aggregator := dataAggregator.New[MetricData, string](
+    aggregator := dataAggregator.New[MetricData, string, uint64](
         ctx,
         5*time.Second,
         1000,
@@ -102,7 +102,7 @@ func main() {
     defer cancel()
     
     // Create aggregator
-    metrics := dataAggregator.New[MetricData, string](
+    metrics := dataAggregator.New[MetricData, string, uint64](
         ctx,
         time.Second*2,
         10000,
@@ -158,15 +158,20 @@ Creating a New Aggregator
 
 Creating a New Aggregator
 ```go
-aggregator := dataAggregator.New[T, P](
+aggregator := dataAggregator.New[T, P, K](
     ctx,                // Context for cancellation
     cleanupInterval,    // How often to move data to channel
     maxPoolSize,        // Buffer size for the channel
     logger,             // Zerolog logger
     valueAccessor,      // Function to access the value pointer
-    keyAccessor,        // Function to get the key from data, if set this nil, can set key in Add method
+    keyAccessor,        // Function to get the key from data, if nil, key can be set in Add method
 )
 ```
+Where:
+
+* ```T```: Your data type
+* ```P```: Key type (must be comparable)
+* ```K```: Value type (must be a number type: uint64, int64,  uint32, or int32)
 
 Key Methods
 
@@ -181,8 +186,9 @@ Key Methods
 
 * Uses sharded maps to minimize lock contention
 * Optimizes for CPU cache locality
-* Implements atomic operations for counter updates
+* Implements atomic operations for various numeric types (uint64, int64, uint32, int32)
 * Scales with available CPU cores
+* Type-safe atomic operations through interface-based dispatching
 
 
 ## License
