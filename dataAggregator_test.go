@@ -18,7 +18,7 @@ import (
 type TestData struct {
 	ID    string
 	Value *uint64
-	V2    *uint32
+	V2    uint32
 }
 
 // TestKey represents the key for test data
@@ -118,14 +118,13 @@ func TestAddFn(t *testing.T) {
 		&logger,
 		func(storeData, newData *TestData) {
 			atomic.AddUint64(storeData.Value, *newData.Value)
-			atomic.AddUint32(storeData.V2, *newData.V2)
+			atomic.AddUint32(&storeData.V2, newData.V2)
 		},
 	)
 	t.Log("add data1")
 	// Test adding a single item
 	v1 := uint64(5)
-	v12 := uint32(1)
-	data1 := &TestData{ID: "test1", Value: &v1, V2: &v12}
+	data1 := &TestData{ID: "test1", Value: &v1, V2: uint32(1)}
 	agg.Add(TestKey(data1.ID), data1)
 
 	// Verify it was added to the slice
@@ -135,7 +134,7 @@ func TestAddFn(t *testing.T) {
 		if string(key) == "test1" {
 			found = true
 			assert.Equal(t, uint64(5), *value.Value)
-			assert.Equal(t, uint32(1), *value.V2)
+			assert.Equal(t, uint32(1), value.V2)
 		}
 	}
 	assert.True(t, found, "Data should be found in the slice")
@@ -143,9 +142,8 @@ func TestAddFn(t *testing.T) {
 	t.Log("add data2")
 	// Use the value from the map for atomic increment
 	v2 := uint64(10)
-	v22 := uint32(10)
 	// Create data with the same memory pointer
-	data2 := &TestData{ID: "test1", Value: &v2, V2: &v22}
+	data2 := &TestData{ID: "test1", Value: &v2, V2: uint32(10)}
 	agg.Add(TestKey(data2.ID), data2) // This should atomically add 10 to the existing value
 
 	// Verify values were aggregated
@@ -155,7 +153,7 @@ func TestAddFn(t *testing.T) {
 		if string(key) == "test1" {
 			found = true
 			assert.Equal(t, uint64(15), *value.Value)
-			assert.Equal(t, uint32(11), *value.V2)
+			assert.Equal(t, uint32(11), value.V2)
 		}
 	}
 	assert.True(t, found, "Aggregated data should be found in the slice")
@@ -289,6 +287,7 @@ func TestParallelAdd(t *testing.T) {
 		&logger,
 		func(old, new *TestData) {
 			atomic.AddUint64(old.Value, *new.Value)
+			atomic.AddUint32(&old.V2, new.V2)
 		},
 	)
 
@@ -302,7 +301,7 @@ func TestParallelAdd(t *testing.T) {
 
 	// First add the initial data
 	v0 := uint64(0)
-	initialData := &TestData{ID: testKey, Value: &v0}
+	initialData := &TestData{ID: testKey, Value: &v0, V2: uint32(0)}
 	agg.Add(TestKey(initialData.ID), initialData)
 
 	// Now have multiple goroutines update it
@@ -311,7 +310,7 @@ func TestParallelAdd(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < incrementsPerWorker; j++ {
 				v1 := uint64(1)
-				increment := &TestData{ID: testKey, Value: &v1}
+				increment := &TestData{ID: testKey, Value: &v1, V2: uint32(1)}
 				agg.Add(TestKey(increment.ID), increment)
 			}
 		}()
@@ -320,14 +319,17 @@ func TestParallelAdd(t *testing.T) {
 	wg.Wait()
 	// Verify total value
 	var totalValue uint64
+	var totalV2 uint32
 	for key, value := range agg.GetItems() {
 		t.Log("key:", key, "value:", *value.Value)
 		if string(key) == testKey {
 			totalValue += *value.Value
+			totalV2 += value.V2
 		}
 	}
 	expectedTotal := uint64(numWorkers * incrementsPerWorker)
 	assert.Equal(t, expectedTotal, totalValue, "Total should match expected parallel increments")
+	assert.Equal(t, uint32(expectedTotal), totalV2, "Total should match expected parallel increments")
 }
 
 func TestShutdown(t *testing.T) {
