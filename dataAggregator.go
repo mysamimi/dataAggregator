@@ -72,11 +72,39 @@ func New[P comparable, T any](
 
 // getShard returns the appropriate shard for a key using fast hash computation
 func (d *DataAggrigrator[P, T]) getShard(key P) *mapShard[P, T] {
-	// Simple but effective hash function for shard selection
-	keyStr := fmt.Sprintf("%v", key)
-	h := uint32(0)
-	for i := range len(keyStr) {
-		h = h*31 + uint32(keyStr[i])
+	var h uint32
+	switch k := any(key).(type) {
+	case string:
+		// FNV-1a hash for strings
+		const offsetBasis uint32 = 2166136261
+		const prime uint32 = 16777619
+		h = offsetBasis
+		for i := 0; i < len(k); i++ {
+			h ^= uint32(k[i])
+			h *= prime
+		}
+	case int:
+		h = uint32(k) // Simple conversion, assumes distribution is okay
+	case int32:
+		h = uint32(k)
+	case int64:
+		// XOR folding for int64
+		h = uint32(k ^ (k >> 32))
+	case uint:
+		h = uint32(k)
+	case uint32:
+		h = k
+	case uint64:
+		// XOR folding for uint64
+		h = uint32(k ^ (k >> 32))
+	default:
+		// Fallback for other types - this can still be a performance bottleneck
+		// Using djb2 hash for the fallback string representation
+		keyStr := fmt.Sprintf("%v", key)
+		h = 5381 // Initial hash value
+		for _, char := range keyStr {
+			h = ((h << 5) + h) + uint32(char) // h = h * 33 + c
+		}
 	}
 	return d.shards[h&d.shardMask]
 }
@@ -135,21 +163,11 @@ func (d *DataAggrigrator[P, T]) Cleanup() {
 func (d *DataAggrigrator[P, T]) Add(key P, data *T) {
 	shard := d.getShard(key)
 
-	// Try read lock first for better concurrency
-	shard.RLock()
-	val, found := shard.items.Load(key)
-	shard.RUnlock()
+	existingVal, loaded := shard.items.LoadOrStore(key, data)
 
-	if found {
-		// Existing key - use atomic add without holding locks
-		d.addFn(val, data)
-		return
+	if loaded {
+		d.addFn(existingVal, data)
 	}
-
-	// Add new entry
-	shard.Lock()
-	shard.items.Store(key, data)
-	shard.Unlock()
 }
 
 func (d *DataAggrigrator[P, T]) ChanPool() chan *T {
