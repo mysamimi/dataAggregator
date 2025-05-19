@@ -6,6 +6,7 @@ import (
 	"os"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 type TestData struct {
 	ID    string
 	Value *uint64
+	V2    *uint32
 }
 
 // TestKey represents the key for test data
@@ -31,15 +33,13 @@ func TestNew(t *testing.T) {
 	defer cancel()
 
 	// Test with valid parameters
-	agg := New[TestData, TestKey](
+	agg := New[TestKey, TestData](
 		ctx,
 		time.Second,
 		10,
 		&logger,
-		func(data *TestData) *uint64 { return data.Value },
-		func(data *TestData) TestKey {
-			key := TestKey(data.ID)
-			return key
+		func(old, new *TestData) {
+			atomic.AddUint64(old.Value, *new.Value)
 		},
 	)
 
@@ -58,22 +58,20 @@ func TestAdd(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	agg := New[TestData, TestKey, uint64](
+	agg := New[TestKey, TestData](
 		ctx,
 		time.Second,
 		10,
 		&logger,
-		func(data *TestData) *uint64 { return data.Value },
-		func(data *TestData) TestKey {
-			key := TestKey(data.ID)
-			return key
+		func(old, new *TestData) {
+			atomic.AddUint64(old.Value, *new.Value)
 		},
 	)
 	t.Log("add data1")
 	// Test adding a single item
 	v1 := uint64(5)
 	data1 := &TestData{ID: "test1", Value: &v1}
-	agg.Add("", data1)
+	agg.Add(TestKey(data1.ID), data1)
 
 	// Verify it was added to the slice
 	found := false
@@ -91,7 +89,7 @@ func TestAdd(t *testing.T) {
 	v2 := uint64(10)
 	// Create data with the same memory pointer
 	data2 := &TestData{ID: "test1", Value: &v2}
-	agg.Add("", data2) // This should atomically add 10 to the existing value
+	agg.Add(TestKey(data2.ID), data2) // This should atomically add 10 to the existing value
 
 	// Verify values were aggregated
 	found = false
@@ -103,20 +101,64 @@ func TestAdd(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "Aggregated data should be found in the slice")
+}
 
-	// Test adding an item with value 0 should be ignored
-	v3 := uint64(0)
-	data3 := &TestData{ID: "test2", Value: &v3}
-	agg.Add("", data3)
+func TestAddFn(t *testing.T) {
+	// Setup logger
+	logger := zerolog.New(os.Stderr).With().Timestamp().Logger()
 
-	// Verify it was not added
-	found = false
-	for key, _ := range agg.GetItems() {
-		if string(key) == "test2" {
+	// Create aggregator
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	agg := New[TestKey, TestData](
+		ctx,
+		time.Second,
+		10,
+		&logger,
+		func(storeData, newData *TestData) {
+			atomic.AddUint64(storeData.Value, *newData.Value)
+			atomic.AddUint32(storeData.V2, *newData.V2)
+		},
+	)
+	t.Log("add data1")
+	// Test adding a single item
+	v1 := uint64(5)
+	v12 := uint32(1)
+	data1 := &TestData{ID: "test1", Value: &v1, V2: &v12}
+	agg.Add(TestKey(data1.ID), data1)
+
+	// Verify it was added to the slice
+	found := false
+	for key, value := range agg.GetItems() {
+		t.Log("key:", key, "value:", *value.Value)
+		if string(key) == "test1" {
 			found = true
+			assert.Equal(t, uint64(5), *value.Value)
+			assert.Equal(t, uint32(1), *value.V2)
 		}
 	}
-	assert.False(t, found, "Zero-value data should not be added to the slice")
+	assert.True(t, found, "Data should be found in the slice")
+
+	t.Log("add data2")
+	// Use the value from the map for atomic increment
+	v2 := uint64(10)
+	v22 := uint32(10)
+	// Create data with the same memory pointer
+	data2 := &TestData{ID: "test1", Value: &v2, V2: &v22}
+	agg.Add(TestKey(data2.ID), data2) // This should atomically add 10 to the existing value
+
+	// Verify values were aggregated
+	found = false
+	for key, value := range agg.GetItems() {
+		t.Log("key:", key, "value:", *value.Value)
+		if string(key) == "test1" {
+			found = true
+			assert.Equal(t, uint64(15), *value.Value)
+			assert.Equal(t, uint32(11), *value.V2)
+		}
+	}
+	assert.True(t, found, "Aggregated data should be found in the slice")
 }
 
 func TestCleanup(t *testing.T) {
@@ -127,25 +169,23 @@ func TestCleanup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	agg := New[TestData, TestKey](
+	agg := New[TestKey, TestData](
 		ctx,
 		time.Millisecond*100,
 		10,
 		&logger,
-		func(data *TestData) *uint64 { return data.Value },
-		func(data *TestData) TestKey {
-			key := TestKey(data.ID)
-			return key
+		func(old, new *TestData) {
+			atomic.AddUint64(old.Value, *new.Value)
 		},
 	)
 
 	// Add test data
 	v1 := uint64(5)
 	data1 := &TestData{ID: "test1", Value: &v1}
-	agg.Add("", data1)
+	agg.Add(TestKey(data1.ID), data1)
 	v2 := uint64(10)
 	data2 := &TestData{ID: "test2", Value: &v2}
-	agg.Add("", data2)
+	agg.Add(TestKey(data2.ID), data2)
 
 	// Manually trigger cleanup
 	agg.Cleanup()
@@ -203,15 +243,13 @@ func TestAutomaticCleanup(t *testing.T) {
 	defer cancel()
 
 	// Use very short ticker interval for testing
-	agg := New[TestData, TestKey](
+	agg := New[TestKey, TestData](
 		ctx,
 		time.Millisecond*200, // Cleanup every 200ms
 		10,
 		&logger,
-		func(data *TestData) *uint64 { return data.Value },
-		func(data *TestData) TestKey {
-			key := TestKey(data.ID)
-			return key
+		func(old, new *TestData) {
+			atomic.AddUint64(old.Value, *new.Value)
 		},
 	)
 
@@ -221,7 +259,7 @@ func TestAutomaticCleanup(t *testing.T) {
 	// Add test data
 	v1 := uint64(5)
 	data1 := &TestData{ID: "test1", Value: &v1}
-	agg.Add("", data1)
+	agg.Add(TestKey(data1.ID), data1)
 
 	// Wait for cleanup to happen automatically
 	time.Sleep(time.Millisecond * 100)
@@ -244,15 +282,13 @@ func TestParallelAdd(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	agg := New[TestData, TestKey](
+	agg := New[TestKey, TestData](
 		ctx,
 		time.Second,
 		1000, // Larger pool for parallel test
 		&logger,
-		func(data *TestData) *uint64 { return data.Value },
-		func(data *TestData) TestKey {
-			key := TestKey(data.ID)
-			return key
+		func(old, new *TestData) {
+			atomic.AddUint64(old.Value, *new.Value)
 		},
 	)
 
@@ -267,7 +303,7 @@ func TestParallelAdd(t *testing.T) {
 	// First add the initial data
 	v0 := uint64(0)
 	initialData := &TestData{ID: testKey, Value: &v0}
-	agg.Add("", initialData)
+	agg.Add(TestKey(initialData.ID), initialData)
 
 	// Now have multiple goroutines update it
 	for i := 0; i < numWorkers; i++ {
@@ -276,7 +312,7 @@ func TestParallelAdd(t *testing.T) {
 			for j := 0; j < incrementsPerWorker; j++ {
 				v1 := uint64(1)
 				increment := &TestData{ID: testKey, Value: &v1}
-				agg.Add("", increment)
+				agg.Add(TestKey(increment.ID), increment)
 			}
 		}()
 	}
@@ -302,15 +338,13 @@ func TestShutdown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	agg := New[TestData, TestKey](
+	agg := New[TestKey, TestData](
 		ctx,
 		time.Second,
 		10,
 		&logger,
-		func(data *TestData) *uint64 { return data.Value },
-		func(data *TestData) TestKey {
-			key := TestKey(data.ID)
-			return key
+		func(old, new *TestData) {
+			atomic.AddUint64(old.Value, *new.Value)
 		},
 	)
 
@@ -320,7 +354,7 @@ func TestShutdown(t *testing.T) {
 	// Add data
 	v1 := uint64(5)
 	data1 := &TestData{ID: "test1", Value: &v1}
-	agg.Add("", data1)
+	agg.Add(TestKey(data1.ID), data1)
 
 	// Give data time to be processed
 	time.Sleep(time.Millisecond * 100)
@@ -356,22 +390,20 @@ func BenchmarkParallelAdd(b *testing.B) {
 
 		// Create aggregator for each iteration
 		ctx, cancel := context.WithCancel(context.Background())
-		agg := New[TestData, TestKey](
+		agg := New[TestKey, TestData](
 			ctx,
 			time.Hour, // Long interval to prevent automatic cleanup during benchmark
 			100000,    // Large pool to prevent blocking
 			&logger,
-			func(data *TestData) *uint64 { return data.Value },
-			func(data *TestData) TestKey {
-				key := TestKey(data.ID)
-				return key
+			func(old, new *TestData) {
+				atomic.AddUint64(old.Value, *new.Value)
 			},
 		)
 
 		// First add the initial data
 		v0 := uint64(0)
 		initialData := &TestData{ID: "benchmark-test", Value: &v0}
-		agg.Add("", initialData)
+		agg.Add(TestKey(initialData.ID), initialData)
 
 		// Configure workers based on available CPUs
 		numWorkers := runtime.NumCPU()
@@ -388,7 +420,7 @@ func BenchmarkParallelAdd(b *testing.B) {
 				for j := 0; j < incrementsPerWorker; j++ {
 					v1 := uint64(1)
 					increment := &TestData{ID: "benchmark-test", Value: &v1}
-					agg.Add("", increment)
+					agg.Add(TestKey(increment.ID), increment)
 				}
 			}()
 		}
@@ -412,15 +444,13 @@ func BenchmarkParallelAddMultipleKeys(b *testing.B) {
 		b.StopTimer()
 
 		ctx, cancel := context.WithCancel(context.Background())
-		agg := New[TestData, TestKey](
+		agg := New[TestKey, TestData](
 			ctx,
 			time.Hour,
 			100000,
 			&logger,
-			func(data *TestData) *uint64 { return data.Value },
-			func(data *TestData) TestKey {
-				key := TestKey(data.ID)
-				return key
+			func(old, new *TestData) {
+				atomic.AddUint64(old.Value, *new.Value)
 			},
 		)
 
@@ -443,12 +473,12 @@ func BenchmarkParallelAddMultipleKeys(b *testing.B) {
 					// Initialize the key
 					v0 := uint64(0)
 					initialData := &TestData{ID: keyID, Value: &v0}
-					agg.Add("", initialData)
+					agg.Add(TestKey(initialData.ID), initialData)
 
 					// Increment the key many times
 					for j := 0; j < incrementsPerKey; j++ {
 						*initialData.Value = 1
-						agg.Add("", initialData)
+						agg.Add(TestKey(initialData.ID), initialData)
 					}
 				}
 			}()

@@ -7,7 +7,7 @@ A high-performance, concurrent data aggregation library for Go applications. Eff
 
 - **High Concurrency**: Sharded map design optimized for parallel operations
 - **Generic Types**: Works with any comparable key and value types
-- **Atomic Updates**: Thread-safe value aggregation with support for multiple numeric types
+- **Custom Aggregation Functions**: Define how your data should be combined, must use atomic function
 - **Periodic Cleanup**: Configurable intervals for processing aggregated data
 - **Memory Efficient**: Only allocates what you need
 - **Type Safe**: Fully leverages Go generics
@@ -27,11 +27,11 @@ package main
 import (
     "context"
     "fmt"
+    "sync/atomic"
     "time"
 
     "github.com/mysamimi/dataAggregator"
     "github.com/rs/zerolog"
-    "github.com/rs/zerolog/log"
 )
 
 // Define your data structure
@@ -51,21 +51,23 @@ func main() {
     // Create the aggregator
     // - cleanup every 5 seconds
     // - channel buffer size of 1000 items
-    aggregator := dataAggregator.New[MetricData, string, uint64](
+    aggregator := dataAggregator.New[string, MetricData](
         ctx,
         5*time.Second,
         1000,
         &logger,
-        func(data *MetricData) *uint64 { return data.Count }, // Value accessor
-        func(data *MetricData) string { return data.Name },   // Key accessor
+        func(stored, new *MetricData) {
+            // Combine values using atomic operations
+            atomic.AddUint64(stored.Count, *new.Count)
+        },
     )
     
     // Add data
     count1 := uint64(5)
-    aggregator.Add(&MetricData{Name: "api.requests", Count: &count1}, "")
+    aggregator.Add("api.requests", &MetricData{Name: "api.requests", Count: &count1})
     
     count2 := uint64(10)
-    aggregator.Add(&MetricData{Name: "api.requests", Count: &count2}, "")
+    aggregator.Add("api.requests", &MetricData{Name: "api.requests", Count: &count2})
     
     // Start a goroutine to process aggregated data
     go func() {
@@ -89,11 +91,17 @@ import (
     "context"
     "fmt"
     "sync"
+    "sync/atomic"
     "time"
 
     "github.com/mysamimi/dataAggregator"
     "github.com/rs/zerolog"
 )
+
+type MetricData struct {
+    Name  string
+    Count *uint64
+}
 
 func main() {
     // Setup
@@ -101,14 +109,15 @@ func main() {
     ctx, cancel := context.WithCancel(context.Background())
     defer cancel()
     
-    // Create aggregator
-    metrics := dataAggregator.New[MetricData, string, uint64](
+    // Create aggregator with custom aggregation function
+    metrics := dataAggregator.New[string, MetricData](
         ctx,
         time.Second*2,
         10000,
         &logger,
-        func(data *MetricData) *uint64 { return data.Count },
-        func(data *MetricData) string { return data.Name },
+        func(stored, new *MetricData) {
+            atomic.AddUint64(stored.Count, *new.Count)
+        },
     )
     
     // Process aggregated metrics
@@ -122,10 +131,13 @@ func main() {
             defer wg.Done()
             for j := 0; j < 1000; j++ {
                 value := uint64(1)
-                metrics.Add(&MetricData{
-                    Name:  fmt.Sprintf("metric.%d", j%5), // Use a few different metrics
-                    Count: &value,
-                }, "")
+                metrics.Add(
+                    fmt.Sprintf("metric.%d", j%5), // Key
+                    &MetricData{
+                        Name:  fmt.Sprintf("metric.%d", j%5),
+                        Count: &value,
+                    },
+                )
                 
                 // Simulate work
                 time.Sleep(time.Millisecond)
@@ -140,15 +152,10 @@ func main() {
     fmt.Println("All done!")
 }
 
-func processMetrics(metrics *dataAggregator.DataAggrigrator[MetricData, string]) {
+func processMetrics(metrics *dataAggregator.DataAggrigrator[string, MetricData]) {
     for metric := range metrics.ChanPool() {
         fmt.Printf("Processed: %s = %d\n", metric.Name, *metric.Count)
     }
-}
-
-type MetricData struct {
-    Name  string
-    Count *uint64
 }
 ```
 
@@ -156,26 +163,23 @@ type MetricData struct {
 
 Creating a New Aggregator
 
-Creating a New Aggregator
 ```go
-aggregator := dataAggregator.New[T, P, K](
+aggregator := dataAggregator.New[P, T](
     ctx,                // Context for cancellation
     cleanupInterval,    // How often to move data to channel
     maxPoolSize,        // Buffer size for the channel
     logger,             // Zerolog logger
-    valueAccessor,      // Function to access the value pointer
-    keyAccessor,        // Function to get the key from data, if nil, key can be set in Add method
+    addFunc,            // Function to combine stored and new data
 )
 ```
 Where:
 
-* ```T```: Your data type
 * ```P```: Key type (must be comparable)
-* ```K```: Value type (must be a number type: uint64, int64,  uint32, or int32)
+* ```T```: Your data type
 
 Key Methods
 
-* ```Add(data *T, key P)``` - Add or update data in the aggregator
+* ```Add(key P, data *T)``` - Add or update data in the aggregator
 * ```ChanPool() chan *T``` - Get the channel for receiving aggregated data
 * ```Cleanup()``` - Manually trigger cleanup
 * ```Shutdown()``` - Properly stop the aggregator and clean up resources
@@ -188,7 +192,7 @@ Key Methods
 * Optimizes for CPU cache locality
 * Implements atomic operations for various numeric types (uint64, int64, uint32, int32)
 * Scales with available CPU cores
-* Type-safe atomic operations through interface-based dispatching
+* Customizable aggregation logic through user-defined functions
 
 
 ## License
