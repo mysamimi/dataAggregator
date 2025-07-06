@@ -11,9 +11,6 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// Number of shards for the map to reduce lock contention
-const defaultShards = 32
-
 type DataAggrigrator[P comparable, T any] struct {
 	shards          []*mapShard[P, T]
 	dataPool        chan *T
@@ -41,10 +38,7 @@ func New[P comparable, T any](
 	addFunc func(storData, newData *T),
 ) *DataAggrigrator[P, T] {
 	// Determine optimal number of shards based on CPU cores
-	numShards := uint32(runtime.NumCPU() * 2)
-	if numShards < defaultShards {
-		numShards = defaultShards
-	}
+	numShards := uint32(runtime.NumCPU())
 
 	// Create sharded maps
 	shards := make([]*mapShard[P, T], numShards)
