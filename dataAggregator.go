@@ -11,7 +11,7 @@ import (
 	"github.com/rs/zerolog"
 )
 
-type DataAggrigrator[P comparable, T any] struct {
+type DataAggregator[P comparable, T any] struct {
 	shards          []*mapShard[P, T]
 	dataPool        chan *T
 	ticker          *time.Ticker
@@ -21,6 +21,8 @@ type DataAggrigrator[P comparable, T any] struct {
 	cleanupInterval time.Duration
 	shardMask       uint32
 	numShards       uint32
+	cancel          context.CancelFunc
+	tickWg          sync.WaitGroup
 }
 
 // Shard for the map to reduce lock contention
@@ -36,7 +38,7 @@ func New[P comparable, T any](
 	maxPoolSize int,
 	logger *zerolog.Logger,
 	addFunc func(storData, newData *T),
-) *DataAggrigrator[P, T] {
+) *DataAggregator[P, T] {
 	// Determine optimal number of shards based on CPU cores
 	numShards := uint32(runtime.NumCPU())
 
@@ -48,7 +50,9 @@ func New[P comparable, T any](
 		}
 	}
 
-	d := &DataAggrigrator[P, T]{
+	ctx, cancel := context.WithCancel(ctx)
+
+	d := &DataAggregator[P, T]{
 		shards:          shards,
 		dataPool:        make(chan *T, maxPoolSize),
 		ticker:          time.NewTicker(cleanupInterval),
@@ -58,14 +62,19 @@ func New[P comparable, T any](
 		cleanupInterval: cleanupInterval,
 		shardMask:       numShards - 1, // For fast modulo using bitwise AND
 		numShards:       numShards,
+		cancel:          cancel,
 	}
 
-	go d.tick(ctx)
+	d.tickWg.Add(1)
+	go func() {
+		defer d.tickWg.Done()
+		d.tick(ctx)
+	}()
 	return d
 }
 
 // getShard returns the appropriate shard for a key using fast hash computation
-func (d *DataAggrigrator[P, T]) getShard(key P) *mapShard[P, T] {
+func (d *DataAggregator[P, T]) getShard(key P) *mapShard[P, T] {
 	var h uint32
 	switch k := any(key).(type) {
 	case string:
@@ -103,7 +112,7 @@ func (d *DataAggrigrator[P, T]) getShard(key P) *mapShard[P, T] {
 	return d.shards[h&d.shardMask]
 }
 
-func (d *DataAggrigrator[P, T]) tick(ctx context.Context) {
+func (d *DataAggregator[P, T]) tick(ctx context.Context) {
 	d.logger.Info().Msg("start tick")
 	for {
 		select {
@@ -115,47 +124,57 @@ func (d *DataAggrigrator[P, T]) tick(ctx context.Context) {
 	}
 }
 
-func (d *DataAggrigrator[P, T]) Cleanup() {
+func (d *DataAggregator[P, T]) Cleanup() {
 	d.logger.Info().Msg("start cleanup")
-	d.wgCleanup.Add(int(d.numShards))
 
 	// Process each shard concurrently for faster cleanup
+	var wg sync.WaitGroup
+	wg.Add(int(d.numShards))
+
 	for i := range d.shards {
-		shard := d.shards[i]
-		// Lock this shard
-		shard.Lock()
+		go func(shard *mapShard[P, T]) {
+			defer wg.Done()
 
-		// Skip empty shards
-		if shard.items.Size() == 0 {
+			// Lock this shard
+			shard.Lock()
+
+			// Skip empty shards
+			if shard.items.Size() == 0 {
+				shard.Unlock()
+				return
+			}
+
+			// Create a new map and swap with the old one
+			oldItems := shard.items
+			shard.items = xsync.NewMap[P, *T]()
 			shard.Unlock()
-			d.wgCleanup.Done()
-			continue
-		}
 
-		// Create a new map and swap with the old one
-		oldItems := shard.items
-		shard.items = xsync.NewMap[P, *T]()
-		shard.Unlock()
+			// Drain the old map into the channel
+			count := 0
+			oldItems.Range(func(key P, value *T) bool {
+				// This will block if channel is full
+				d.dataPool <- value
+				count++
+				return true
+			})
 
-		// Drain the old map into the channel
-		count := 0
-		oldItems.Range(func(key P, value *T) bool {
-			// This will block if channel is full
-			d.dataPool <- value
-			count++
-			return true
-		})
-
-		if count > 0 {
-			d.logger.Debug().Msgf("cleaned up %d items from shard", count)
-		}
-		d.wgCleanup.Done()
+			if count > 0 {
+				d.logger.Debug().Msgf("cleaned up %d items from shard", count)
+			}
+		}(d.shards[i])
 	}
+	wg.Wait()
 }
 
 // Add is an optimized implementation that reduces lock contention
-func (d *DataAggrigrator[P, T]) Add(key P, data *T) {
+// Add is an optimized implementation that reduces lock contention
+func (d *DataAggregator[P, T]) Add(key P, data *T) {
 	shard := d.getShard(key)
+
+	// We need a read lock to ensure the map pointer (shard.items) doesn't change
+	// while we're using it (e.g. during cleanup)
+	shard.RLock()
+	defer shard.RUnlock()
 
 	existingVal, loaded := shard.items.LoadOrStore(key, data)
 
@@ -164,20 +183,26 @@ func (d *DataAggrigrator[P, T]) Add(key P, data *T) {
 	}
 }
 
-func (d *DataAggrigrator[P, T]) ChanPool() chan *T {
+func (d *DataAggregator[P, T]) ChanPool() chan *T {
 	return d.dataPool
 }
 
-func (d *DataAggrigrator[P, T]) Shutdown() {
+func (d *DataAggregator[P, T]) Shutdown() {
 	// Stop ticker first
 	d.ticker.Stop()
 	d.logger.Info().Msg("tick stopped")
 
+	// Cancel the context to stop the tick loop
+	if d.cancel != nil {
+		d.cancel()
+	}
+
+	// Wait for tick loop to exit
+	d.tickWg.Wait()
+	d.logger.Info().Msg("tick loop exited")
+
 	// Run final cleanup on each shard
 	d.Cleanup()
-
-	// Wait for all cleanups to complete
-	d.wgCleanup.Wait()
 	d.logger.Info().Msg("finished cleanup")
 
 	// Close channel safely
@@ -186,12 +211,12 @@ func (d *DataAggrigrator[P, T]) Shutdown() {
 }
 
 // GetShardCount returns the number of shards for testing/debugging
-func (d *DataAggrigrator[P, T]) GetShardCount() uint32 {
+func (d *DataAggregator[P, T]) GetShardCount() uint32 {
 	return d.numShards
 }
 
 // GetSize returns the total count of items across all shards
-func (d *DataAggrigrator[P, T]) GetSize() int {
+func (d *DataAggregator[P, T]) GetSize() int {
 	total := 0
 	for _, shard := range d.shards {
 		shard.RLock()
@@ -201,7 +226,7 @@ func (d *DataAggrigrator[P, T]) GetSize() int {
 	return total
 }
 
-func (d *DataAggrigrator[P, T]) GetItems() map[P]*T {
+func (d *DataAggregator[P, T]) GetItems() map[P]*T {
 	items := make(map[P]*T, 0)
 	for _, shard := range d.shards {
 		shard.RLock()
@@ -214,7 +239,7 @@ func (d *DataAggrigrator[P, T]) GetItems() map[P]*T {
 	return items
 }
 
-func (d *DataAggrigrator[P, T]) GetItem(key P) *T {
+func (d *DataAggregator[P, T]) GetItem(key P) *T {
 	shard := d.getShard(key)
 	shard.RLock()
 	defer shard.RUnlock()
@@ -225,6 +250,6 @@ func (d *DataAggrigrator[P, T]) GetItem(key P) *T {
 	return nil
 }
 
-func (d *DataAggrigrator[P, T]) GetTicker() *time.Ticker {
+func (d *DataAggregator[P, T]) GetTicker() *time.Ticker {
 	return d.ticker
 }

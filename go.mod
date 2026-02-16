@@ -1,9 +1,9 @@
 module github.com/mysamimi/dataAggregator
 
-go 1.24.3
+go 1.25
 
 require (
-	github.com/puzpuzpuz/xsync/v4 v4.1.0
+	github.com/puzpuzpuz/xsync/v4 v4.4.0
 	github.com/rs/zerolog v1.34.0
 )
 

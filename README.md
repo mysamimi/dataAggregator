@@ -18,6 +18,13 @@ A high-performance, concurrent data aggregation library for Go applications. Eff
 go get github.com/mysamimi/dataAggregator
 ```
 
+## Thread Safety
+
+> [!IMPORTANT]
+> The `addFunc` provided to `New` MUST be thread-safe for concurrent access to the same key.
+> If multiple goroutines call `Add` with the same key, `addFunc` will be called concurrently.
+> Use atomic operations (e.g., `atomic.AddUint64`) or proper locking within your data structure if it contains shared state.
+
 ## Usage
 Basic Example
 
@@ -152,7 +159,7 @@ func main() {
     fmt.Println("All done!")
 }
 
-func processMetrics(metrics *dataAggregator.DataAggrigrator[string, MetricData]) {
+func processMetrics(metrics *dataAggregator.DataAggregator[string, MetricData]) {
     for metric := range metrics.ChanPool() {
         fmt.Printf("Processed: %s = %d\n", metric.Name, *metric.Count)
     }
@@ -193,6 +200,17 @@ Key Methods
 * Implements atomic operations for various numeric types (uint64, int64, uint32, int32)
 * Scales with available CPU cores
 * Customizable aggregation logic through user-defined functions
+
+## Performance
+
+### Command
+go test -bench=. -benchmem -run=^$ ./...
+
+### Results
+| Benchmark | Iterations | Time (ns/op) | Bytes/op | Allocs/op |
+|-----------|------------|--------------|----------|-----------|
+| `BenchmarkParallelAdd-16` | 733 | 1,635,363 | 724,423 | 40,037 |
+| `BenchmarkParallelAddMultipleKeys-16` | 153 | 7,755,561 | 6,631,846 | 329,768 |
 
 
 ## License

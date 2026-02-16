@@ -491,3 +491,94 @@ func BenchmarkParallelAddMultipleKeys(b *testing.B) {
 		cancel()
 	}
 }
+
+func TestConcurrency_Add_vs_Cleanup(t *testing.T) {
+	// Setup logger
+	logger := zerolog.New(os.Stderr).With().Timestamp().Logger()
+
+	// Create aggregator with short cleanup interval
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	agg := New[string, int64](
+		ctx,
+		time.Millisecond*10, // Fast cleanup
+		1000,
+		&logger,
+		func(old, new *int64) {
+			atomic.AddInt64(old, *new)
+		},
+	)
+
+	// Run for a fixed duration
+	duration := time.Second * 2
+	done := make(chan struct{})
+	time.AfterFunc(duration, func() {
+		close(done)
+	})
+
+	var wg sync.WaitGroup
+
+	// Writer goroutines
+	numWriters := 10
+	wg.Add(numWriters)
+	for i := 0; i < numWriters; i++ {
+		go func(id int) {
+			defer wg.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+					val := int64(1)
+					key := fmt.Sprintf("key-%d", id%5) // Shared keys
+					agg.Add(key, &val)
+					// Small sleep to allow context switches
+					if id%2 == 0 {
+						runtime.Gosched()
+					}
+				}
+			}
+		}(i)
+	}
+
+	// Cleaner goroutine (in addition to the automatic one)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				// Manually trigger cleanup frequently to stress test locking
+				agg.Cleanup()
+				time.Sleep(time.Millisecond * 5)
+			}
+		}
+	}()
+
+	// Consumer goroutine to empty the channel so it doesn't block
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-done:
+				// Drain remaining
+				for {
+					select {
+					case <-agg.ChanPool():
+					default:
+						return
+					}
+				}
+			case <-agg.ChanPool():
+				// consume
+			}
+		}
+	}()
+
+	wg.Wait()
+	agg.Shutdown()
+}
