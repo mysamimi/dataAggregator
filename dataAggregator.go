@@ -39,8 +39,15 @@ func New[P comparable, T any](
 	logger *zerolog.Logger,
 	addFunc func(storData, newData *T),
 ) *DataAggregator[P, T] {
-	// Determine optimal number of shards based on CPU cores
-	numShards := uint32(runtime.NumCPU())
+	// Determine optimal number of shards (next power of 2 for fast masking)
+	numCPUs := runtime.NumCPU()
+	numShards := uint32(1)
+	for numShards < uint32(numCPUs) {
+		numShards <<= 1
+	}
+	if numShards < 4 {
+		numShards = 4 // Minimum shards
+	}
 
 	// Create sharded maps
 	shards := make([]*mapShard[P, T], numShards)
@@ -100,13 +107,18 @@ func (d *DataAggregator[P, T]) getShard(key P) *mapShard[P, T] {
 	case uint64:
 		// XOR folding for uint64
 		h = uint32(k ^ (k >> 32))
+	case float32:
+		h = uint32(k)
+	case float64:
+		h = uint32(k) ^ uint32(uint64(k)>>32)
 	default:
-		// Fallback for other types - this can still be a performance bottleneck
-		// Using djb2 hash for the fallback string representation
-		keyStr := fmt.Sprintf("%v", key)
-		h = 5381 // Initial hash value
-		for _, char := range keyStr {
-			h = ((h << 5) + h) + uint32(char) // h = h * 33 + c
+		// Fallback for other types - using a simpler way to get a string if possible
+		// or just using a constant to avoid the expensive fmt.Sprintf in tight loops
+		// if performance is critical for custom types, they should be added above.
+		h = 5381
+		keyStr := fmt.Sprint(key)
+		for i := 0; i < len(keyStr); i++ {
+			h = ((h << 5) + h) + uint32(keyStr[i])
 		}
 	}
 	return d.shards[h&d.shardMask]
@@ -152,9 +164,15 @@ func (d *DataAggregator[P, T]) Cleanup() {
 			// Drain the old map into the channel
 			count := 0
 			oldItems.Range(func(key P, value *T) bool {
-				// This will block if channel is full
-				d.dataPool <- value
-				count++
+				select {
+				case d.dataPool <- value:
+					count++
+				case <-time.After(time.Second * 5):
+					d.logger.Warn().Interface("key", key).Msg("cleanup blocked: data pool is full")
+					// Still try to push, but we've warned
+					d.dataPool <- value
+					count++
+				}
 				return true
 			})
 
@@ -167,8 +185,7 @@ func (d *DataAggregator[P, T]) Cleanup() {
 }
 
 // Add is an optimized implementation that reduces lock contention
-// Add is an optimized implementation that reduces lock contention
-func (d *DataAggregator[P, T]) Add(key P, data *T) {
+func (d *DataAggregator[P, T]) Add(key P, data *T) bool {
 	shard := d.getShard(key)
 
 	// We need a read lock to ensure the map pointer (shard.items) doesn't change
@@ -176,11 +193,14 @@ func (d *DataAggregator[P, T]) Add(key P, data *T) {
 	shard.RLock()
 	defer shard.RUnlock()
 
-	existingVal, loaded := shard.items.LoadOrStore(key, data)
-
-	if loaded {
-		d.addFn(existingVal, data)
-	}
+	_, loaded := shard.items.Compute(key, func(oldValue *T, loaded bool) (*T, xsync.ComputeOp) {
+		if !loaded {
+			return data, xsync.UpdateOp
+		}
+		d.addFn(oldValue, data)
+		return oldValue, xsync.UpdateOp
+	})
+	return loaded
 }
 
 func (d *DataAggregator[P, T]) ChanPool() chan *T {

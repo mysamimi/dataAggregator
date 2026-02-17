@@ -582,3 +582,85 @@ func TestConcurrency_Add_vs_Cleanup(t *testing.T) {
 	wg.Wait()
 	agg.Shutdown()
 }
+
+func TestHighConcurrency(t *testing.T) {
+	// Setup logger to discard to not slow down the test too much
+	logger := zerolog.Nop()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// High concurrency parameters
+	const numWriters = 1000     // Total number of writer goroutines
+	const itemsPerWriter = 1000 // Items added by each writer
+	const numKeys = 500         // Number of unique keys
+	const cleanupInterval = 50 * time.Millisecond
+	const poolSize = 10000
+
+	// Track expected totals
+	var expectedGrandTotal uint64 = uint64(numWriters * itemsPerWriter)
+	keyTotals := make([]*uint64, numKeys)
+	for i := range keyTotals {
+		var v uint64
+		keyTotals[i] = &v
+	}
+
+	agg := New[string, uint64](
+		ctx,
+		cleanupInterval,
+		poolSize,
+		&logger,
+		func(old, new *uint64) {
+			atomic.AddUint64(old, *new)
+		},
+	)
+
+	var wg sync.WaitGroup
+	wg.Add(numWriters)
+
+	start := time.Now()
+
+	// Launch writers
+	for i := 0; i < numWriters; i++ {
+		go func(writerID int) {
+			defer wg.Done()
+			for j := 0; j < itemsPerWriter; j++ {
+				keyIndex := (writerID + j) % numKeys
+				key := fmt.Sprintf("key-%d", keyIndex)
+				val := uint64(1)
+
+				agg.Add(key, &val)
+				atomic.AddUint64(keyTotals[keyIndex], 1)
+
+				// Occasionally yield
+				if j%100 == 0 {
+					runtime.Gosched()
+				}
+			}
+		}(i)
+	}
+
+	// Launch consumer
+	var actualGrandTotal uint64
+	consumerDone := make(chan struct{})
+	go func() {
+		defer close(consumerDone)
+		for val := range agg.ChanPool() {
+			atomic.AddUint64(&actualGrandTotal, *val)
+		}
+	}()
+
+	// Wait for writers to finish
+	wg.Wait()
+	duration := time.Since(start)
+	t.Logf("Writers finished in %v. Total items: %d", duration, expectedGrandTotal)
+
+	// Shutdown aggregator to trigger final cleanup and close channel
+	agg.Shutdown()
+
+	// Wait for consumer to finish processing the channel
+	<-consumerDone
+
+	// Final verification
+	assert.Equal(t, expectedGrandTotal, actualGrandTotal, "Grand total should match")
+}
