@@ -184,7 +184,8 @@ func (d *DataAggregator[P, T]) Cleanup() {
 	wg.Wait()
 }
 
-// Add is an optimized implementation that reduces lock contention
+// Add returns true if the item was aggregated (merged) into an existing entry,
+// or false if it was newly stored.
 func (d *DataAggregator[P, T]) Add(key P, data *T) bool {
 	shard := d.getShard(key)
 
@@ -193,14 +194,16 @@ func (d *DataAggregator[P, T]) Add(key P, data *T) bool {
 	shard.RLock()
 	defer shard.RUnlock()
 
-	_, loaded := shard.items.Compute(key, func(oldValue *T, loaded bool) (*T, xsync.ComputeOp) {
+	var wasLoaded bool
+	shard.items.Compute(key, func(oldValue *T, loaded bool) (*T, xsync.ComputeOp) {
+		wasLoaded = loaded
 		if !loaded {
 			return data, xsync.UpdateOp
 		}
 		d.addFn(oldValue, data)
 		return oldValue, xsync.UpdateOp
 	})
-	return loaded
+	return wasLoaded
 }
 
 func (d *DataAggregator[P, T]) ChanPool() chan *T {
