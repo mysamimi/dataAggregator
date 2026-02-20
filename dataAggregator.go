@@ -167,11 +167,8 @@ func (d *DataAggregator[P, T]) Cleanup() {
 				select {
 				case d.dataPool <- value:
 					count++
-				case <-time.After(time.Second * 5):
-					d.logger.Warn().Interface("key", key).Msg("cleanup blocked: data pool is full")
-					// Still try to push, but we've warned
-					d.dataPool <- value
-					count++
+				default:
+					d.logger.Warn().Interface("key", key).Msg("cleanup dropped item: data pool is full")
 				}
 				return true
 			})
