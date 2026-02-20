@@ -9,6 +9,7 @@ A high-performance, concurrent data aggregation library for Go applications. Eff
 - **Generic Types**: Works with any comparable key and value types
 - **Custom Aggregation Functions**: Define how your data should be combined, must use atomic function
 - **Periodic Cleanup**: Configurable intervals for processing aggregated data
+- **Zero Data Loss Guarantee**: Automatically re-inserts data if the output pool is at capacity during cleanup
 - **Memory Efficient**: Only allocates what you need
 - **Type Safe**: Fully leverages Go generics
 

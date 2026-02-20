@@ -163,18 +163,22 @@ func (d *DataAggregator[P, T]) Cleanup() {
 
 			// Drain the old map into the channel
 			count := 0
+			queued := 0
 			oldItems.Range(func(key P, value *T) bool {
 				select {
 				case d.dataPool <- value:
 					count++
 				default:
-					d.logger.Warn().Interface("key", key).Msg("cleanup dropped item: data pool is full")
+					// dataPool is full, re-insert into the active map (this won't lose data)
+					d.Add(key, value)
+					queued++
+					// Optional: Log fewer times or at debug level if spam is an issue
 				}
 				return true
 			})
 
-			if count > 0 {
-				d.logger.Debug().Msgf("cleaned up %d items from shard", count)
+			if count > 0 || queued > 0 {
+				d.logger.Debug().Msgf("cleaned up %d items (re-inserted %d) from shard", count, queued)
 			}
 		}(d.shards[i])
 	}

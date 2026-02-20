@@ -232,6 +232,67 @@ collectLoop:
 	assert.True(t, foundTest2, "Should find test2 data")
 }
 
+func TestCleanup_FullPool(t *testing.T) {
+	// Setup logger
+	logger := zerolog.New(os.Stderr).With().Timestamp().Logger()
+
+	// Create aggregator
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	agg := New[TestKey, TestData](
+		ctx,
+		time.Millisecond*100,
+		1, // Pool size of 1 to easily fill it
+		&logger,
+		func(old, new *TestData) {
+			atomic.AddUint64(old.Value, *new.Value)
+		},
+	)
+
+	// Add 3 items (more than pool size)
+	v1 := uint64(5)
+	data1 := &TestData{ID: "test1", Value: &v1}
+	agg.Add(TestKey(data1.ID), data1)
+
+	v2 := uint64(10)
+	data2 := &TestData{ID: "test2", Value: &v2}
+	agg.Add(TestKey(data2.ID), data2)
+
+	v3 := uint64(15)
+	data3 := &TestData{ID: "test3", Value: &v3}
+	agg.Add(TestKey(data3.ID), data3)
+
+	// Manually trigger cleanup
+	// 1 item will go to the pool, 2 will be re-inserted into the map
+	agg.Cleanup()
+
+	// Verify the channel has 1 item
+	assert.Equal(t, 1, len(agg.ChanPool()), "Channel should have 1 item")
+
+	// Verify the map has the other 2 items (because they were re-inserted)
+	count := 0
+	for range agg.GetItems() {
+		count++
+	}
+	assert.Equal(t, 2, count, "Map should have 2 items remaining after full pool cleanup")
+
+	// Consume the 1 item from the channel
+	<-agg.ChanPool()
+
+	// Trigger cleanup again, now the remaining 2 should try to go to the pool
+	// 1 will go to the pool, 1 will be re-inserted
+	agg.Cleanup()
+
+	assert.Equal(t, 1, len(agg.ChanPool()), "Channel should have 1 item again")
+
+	count2 := 0
+	for range agg.GetItems() {
+		count2++
+	}
+	assert.Equal(t, 1, count2, "Map should have 1 item remaining after second cleanup")
+}
+
 func TestAutomaticCleanup(t *testing.T) {
 	// Setup logger
 	logger := zerolog.New(os.Stderr).With().Timestamp().Logger()
@@ -663,4 +724,101 @@ func TestHighConcurrency(t *testing.T) {
 
 	// Final verification
 	assert.Equal(t, expectedGrandTotal, actualGrandTotal, "Grand total should match")
+}
+
+func TestWithSyncPool_And_Requeue(t *testing.T) {
+	// Setup logger
+	logger := zerolog.Nop()
+
+	// Create a context
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// 1. Create a sync.Pool for TestData
+	pool := &sync.Pool{
+		New: func() any {
+			v := uint64(0)
+			return &TestData{Value: &v}
+		},
+	}
+
+	// 2. Create the aggregator with a very small channel pool (e.g., 5)
+	// This ensures that `dataPool` fills up quickly, forcing the `default`
+	// case in Cleanup() to re-insert the item back into the map.
+	agg := New[string, TestData](
+ctx,
+time.Millisecond*50, // Fast cleanup interval
+5,                   // Very small channel size to guarantee full channel & requeuing
+		&logger,
+		func(old, new *TestData) {
+			// Aggregate the data
+			atomic.AddUint64(old.Value, *new.Value)
+		},
+	)
+
+	var wg sync.WaitGroup
+	numWriters := 100
+	itemsPerWriter := 1000
+
+	start := time.Now()
+
+	// Launch writers
+	for i := 0; i < numWriters; i++ {
+		wg.Add(1)
+		go func(writerID int) {
+			defer wg.Done()
+			for j := 0; j < itemsPerWriter; j++ {
+				// Rent from sync.Pool
+				item := pool.Get().(*TestData)
+				
+				// Prepare the item's state
+key := fmt.Sprintf("key-%d", j%20) // 20 distinct keys -> high aggregation chance
+item.ID = key
+*item.Value = 1 // Add 1 count for this event
+
+// Add to aggregator
+merged := agg.Add(key, item)
+
+// If it was merged into an existing map record, we don't need this item anymore
+				if merged {
+					pool.Put(item)
+				}
+				
+				// Occasionally yield to increase contention
+				if j%50 == 0 {
+					runtime.Gosched()
+				}
+			}
+		}(i)
+	}
+
+	var actualTotal uint64
+	consumerDone := make(chan struct{})
+
+	// Launch consumer
+	go func() {
+		defer close(consumerDone)
+		// Read aggregated items from the channel
+		for item := range agg.ChanPool() {
+			// Tally up the total count to ensure Zero Data Loss
+			atomic.AddUint64(&actualTotal, *item.Value)
+			
+			// Return the consumed item back to the sync.Pool
+			pool.Put(item)
+		}
+	}()
+
+	// Wait for all writers to finish their loops
+	wg.Wait()
+	t.Logf("Writers finished in %v", time.Since(start))
+
+	// Shutdown will perform one final cleanup and close ChanPool
+	agg.Shutdown()
+
+	// Wait for consumer to finish reading the remaining items
+	<-consumerDone
+
+	// Assertions
+	expectedTotal := uint64(numWriters * itemsPerWriter)
+	assert.Equal(t, expectedTotal, actualTotal, "Total aggregated values must perfectly match all inserted counts despite re-queuing and sync.Pool usage")
 }
