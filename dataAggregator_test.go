@@ -233,9 +233,26 @@ collectLoop:
 	assert.True(t, foundTest2, "Should find test2 data")
 }
 
+type ThreadSafeBuffer struct {
+	b strings.Builder
+	m sync.Mutex
+}
+
+func (b *ThreadSafeBuffer) Write(p []byte) (n int, err error) {
+	b.m.Lock()
+	defer b.m.Unlock()
+	return b.b.Write(p)
+}
+
+func (b *ThreadSafeBuffer) String() string {
+	b.m.Lock()
+	defer b.m.Unlock()
+	return b.b.String()
+}
+
 func TestCleanup_OverlapSkipped(t *testing.T) {
-	// Setup logger with a string builder to catch the debug skip message
-	var buf strings.Builder
+	// Setup logger with a thread-safe string builder to catch the debug skip message
+	var buf ThreadSafeBuffer
 	logger := zerolog.New(&buf).With().Timestamp().Logger()
 
 	ctx, cancel := context.WithCancel(context.Background())

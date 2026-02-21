@@ -232,9 +232,14 @@ func (d *DataAggregator[P, T]) Shutdown() {
 	d.tickWg.Wait()
 	d.logger.Info().Msg("tick loop exited")
 
-	// Run final cleanup on each shard
-	d.Cleanup()
-	d.logger.Info().Msg("finished cleanup")
+	// Run final cleanup until the map is completely empty
+	// This ensures that any items re-inserted due to a full dataPool are eventually flushed.
+	for d.GetSize() > 0 {
+		d.Cleanup()
+		// Yield/wait slightly to let the consumer drain the channel
+		time.Sleep(time.Millisecond * 5)
+	}
+	d.logger.Info().Msg("finished final cleanup")
 
 	// Close channel safely
 	close(d.dataPool)
