@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -230,6 +231,40 @@ collectLoop:
 	}
 	assert.True(t, foundTest1, "Should find test1 data")
 	assert.True(t, foundTest2, "Should find test2 data")
+}
+
+func TestCleanup_OverlapSkipped(t *testing.T) {
+	// Setup logger with a string builder to catch the debug skip message
+	var buf strings.Builder
+	logger := zerolog.New(&buf).With().Timestamp().Logger()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	agg := New[TestKey, TestData](
+		ctx,
+		time.Millisecond*5, // Fast tick
+		100,
+		&logger,
+		func(old, new *TestData) {
+			atomic.AddUint64(old.Value, *new.Value)
+		},
+	)
+
+	// Manually set the lock to true so the next tick skips
+	agg.isCleaning.Store(true)
+
+	// Wait a bit so multiple ticks trigger and hit the "skip" branch
+	time.Sleep(time.Millisecond * 30)
+
+	// Revert the lock so Shutdown can cleanly finish
+	agg.isCleaning.Store(false)
+
+	// Proper shutdown
+	agg.Shutdown()
+
+	logOutput := buf.String()
+	assert.Contains(t, logOutput, "cleanup skipped: previous cleanup still in progress", "Should have skipped overlapping cleanups and logged it")
 }
 
 func TestCleanup_FullPool(t *testing.T) {
@@ -746,9 +781,9 @@ func TestWithSyncPool_And_Requeue(t *testing.T) {
 	// This ensures that `dataPool` fills up quickly, forcing the `default`
 	// case in Cleanup() to re-insert the item back into the map.
 	agg := New[string, TestData](
-ctx,
-time.Millisecond*50, // Fast cleanup interval
-5,                   // Very small channel size to guarantee full channel & requeuing
+		ctx,
+		time.Millisecond*50, // Fast cleanup interval
+		5,                   // Very small channel size to guarantee full channel & requeuing
 		&logger,
 		func(old, new *TestData) {
 			// Aggregate the data
@@ -770,20 +805,20 @@ time.Millisecond*50, // Fast cleanup interval
 			for j := 0; j < itemsPerWriter; j++ {
 				// Rent from sync.Pool
 				item := pool.Get().(*TestData)
-				
+
 				// Prepare the item's state
-key := fmt.Sprintf("key-%d", j%20) // 20 distinct keys -> high aggregation chance
-item.ID = key
-*item.Value = 1 // Add 1 count for this event
+				key := fmt.Sprintf("key-%d", j%20) // 20 distinct keys -> high aggregation chance
+				item.ID = key
+				*item.Value = 1 // Add 1 count for this event
 
-// Add to aggregator
-merged := agg.Add(key, item)
+				// Add to aggregator
+				merged := agg.Add(key, item)
 
-// If it was merged into an existing map record, we don't need this item anymore
+				// If it was merged into an existing map record, we don't need this item anymore
 				if merged {
 					pool.Put(item)
 				}
-				
+
 				// Occasionally yield to increase contention
 				if j%50 == 0 {
 					runtime.Gosched()
@@ -802,7 +837,7 @@ merged := agg.Add(key, item)
 		for item := range agg.ChanPool() {
 			// Tally up the total count to ensure Zero Data Loss
 			atomic.AddUint64(&actualTotal, *item.Value)
-			
+
 			// Return the consumed item back to the sync.Pool
 			pool.Put(item)
 		}

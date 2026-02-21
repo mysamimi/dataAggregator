@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
@@ -23,6 +24,7 @@ type DataAggregator[P comparable, T any] struct {
 	numShards       uint32
 	cancel          context.CancelFunc
 	tickWg          sync.WaitGroup
+	isCleaning      atomic.Bool
 }
 
 // Shard for the map to reduce lock contention
@@ -131,7 +133,12 @@ func (d *DataAggregator[P, T]) tick(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-d.ticker.C:
-			d.Cleanup()
+			if d.isCleaning.CompareAndSwap(false, true) {
+				d.Cleanup()
+				d.isCleaning.Store(false)
+			} else {
+				d.logger.Debug().Msg("cleanup skipped: previous cleanup still in progress")
+			}
 		}
 	}
 }

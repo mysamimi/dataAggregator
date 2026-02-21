@@ -1,6 +1,6 @@
 module github.com/mysamimi/dataAggregator
 
-go 1.25
+go 1.26
 
 require (
 	github.com/puzpuzpuz/xsync/v4 v4.4.0
